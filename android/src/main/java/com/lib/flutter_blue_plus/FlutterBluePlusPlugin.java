@@ -101,6 +101,7 @@ public class FlutterBluePlusPlugin implements
 
     private final Map<String, BluetoothGatt> mConnectedDevices = new ConcurrentHashMap<>();
     private final Map<String, BluetoothGatt> mCurrentlyConnectingDevices = new ConcurrentHashMap<>();
+    private final Map<String, BluetoothGatt> mWantDisconnectDevices = new ConcurrentHashMap<>();
     private final Map<String, BluetoothDevice> mBondingDevices = new ConcurrentHashMap<>();
     private final Map<String, Integer> mMtu = new ConcurrentHashMap<>();
     private final Map<String, BluetoothGatt> mAutoConnected = new ConcurrentHashMap<>();
@@ -675,6 +676,9 @@ public class FlutterBluePlusPlugin implements
                             return;
                         }
 
+                        // remove this device from "should stay disconnected" list
+                        mWantDisconnectDevices.remove(remoteId);
+
                         // already connecting?
                         if (mCurrentlyConnectingDevices.get(remoteId) != null) {
                             log(LogLevel.DEBUG, "already connecting");
@@ -753,6 +757,11 @@ public class FlutterBluePlusPlugin implements
                         result.success(false);  // no work to do
                         return;
                     }
+
+                    // we want this device to stay disconnected
+                    if (mWantDisconnectDevices.get(remoteId) == null) {
+                        mWantDisconnectDevices.put(remoteId, gatt);
+                    } 
 
                     // calling disconnect explicitly turns off autoconnect.
                     // this allows gatt resources to be reclaimed
@@ -2102,21 +2111,32 @@ public class FlutterBluePlusPlugin implements
             }
 
             String remoteId = gatt.getDevice().getAddress();
+            boolean stayDisconnected = (mWantDisconnectDevices.get(remoteId) != null);
 
             // connected?
             if(newState == BluetoothProfile.STATE_CONNECTED) {
-                // add to connected devices
-                mConnectedDevices.put(remoteId, gatt);
+                if (stayDisconnected == false) {
+                    // add to connected devices
+                    mConnectedDevices.put(remoteId, gatt);
 
-                // remove from currently connecting devices
-                mCurrentlyConnectingDevices.remove(remoteId);
+                    // remove from currently connecting devices
+                    mCurrentlyConnectingDevices.remove(remoteId);
 
-                // default minimum mtu
-                mMtu.put(remoteId, 23);
+                    // default minimum mtu
+                    mMtu.put(remoteId, 23);
+                } 
             }
 
-            // disconnected?
-            if(newState == BluetoothProfile.STATE_DISCONNECTED) {
+            // disconnected or keep device disconnected?
+            if(newState == BluetoothProfile.STATE_DISCONNECTED || stayDisconnected == true) {
+
+                if (stayDisconnected == true) {
+                    // close gatt resource just in case
+                    mWantDisconnectDevices.get(remoteId).close();
+                    if (newState != BluetoothProfile.STATE_DISCONNECTED) {
+                        log(LogLevel.DEBUG, "keeping device disconnected, disconnecting now");
+                    }
+                }
 
                 // remove from connected devices
                 mConnectedDevices.remove(remoteId);
