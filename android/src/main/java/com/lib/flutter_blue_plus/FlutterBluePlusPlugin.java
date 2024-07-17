@@ -101,7 +101,7 @@ public class FlutterBluePlusPlugin implements
 
     private final Map<String, BluetoothGatt> mConnectedDevices = new ConcurrentHashMap<>();
     private final Map<String, BluetoothGatt> mCurrentlyConnectingDevices = new ConcurrentHashMap<>();
-    private final Map<String, BluetoothGatt> mWantDisconnectDevices = new ConcurrentHashMap<>();
+    private final Map<String, BluetoothGatt> mStayDisconnectedDevices = new ConcurrentHashMap<>();
     private final Map<String, BluetoothDevice> mBondingDevices = new ConcurrentHashMap<>();
     private final Map<String, Integer> mMtu = new ConcurrentHashMap<>();
     private final Map<String, BluetoothGatt> mAutoConnected = new ConcurrentHashMap<>();
@@ -677,7 +677,7 @@ public class FlutterBluePlusPlugin implements
                         }
 
                         // remove this device from "should stay disconnected" list
-                        mWantDisconnectDevices.remove(remoteId);
+                        mStayDisconnectedDevices.remove(remoteId);
 
                         // already connecting?
                         if (mCurrentlyConnectingDevices.get(remoteId) != null) {
@@ -759,8 +759,8 @@ public class FlutterBluePlusPlugin implements
                     }
 
                     // we want this device to stay disconnected
-                    if (mWantDisconnectDevices.get(remoteId) == null) {
-                        mWantDisconnectDevices.put(remoteId, gatt);
+                    if (mStayDisconnectedDevices.get(remoteId) == null) {
+                        mStayDisconnectedDevices.put(remoteId, gatt);
                     } 
 
                     // calling disconnect explicitly turns off autoconnect.
@@ -2111,7 +2111,7 @@ public class FlutterBluePlusPlugin implements
             }
 
             String remoteId = gatt.getDevice().getAddress();
-            boolean stayDisconnected = (mWantDisconnectDevices.get(remoteId) != null);
+            boolean stayDisconnected = (mStayDisconnectedDevices.get(remoteId) != null);
 
             // connected?
             if(newState == BluetoothProfile.STATE_CONNECTED) {
@@ -2132,7 +2132,7 @@ public class FlutterBluePlusPlugin implements
 
                 if (stayDisconnected == true) {
                     // close gatt resource just in case
-                    mWantDisconnectDevices.get(remoteId).close();
+                    mStayDisconnectedDevices.get(remoteId).close();
                     if (newState != BluetoothProfile.STATE_DISCONNECTED) {
                         log(LogLevel.DEBUG, "keeping device disconnected, disconnecting now");
                     }
