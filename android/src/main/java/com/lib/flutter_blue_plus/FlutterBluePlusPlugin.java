@@ -1734,6 +1734,11 @@ public class FlutterBluePlusPlugin implements
                 // quickly run out of bluetooth resources, preventing new connections
                 log(LogLevel.DEBUG, "calling close: " + remoteId);
                 gatt.close();
+
+                // we want this device to stay disconnected
+                if (mStayDisconnectedDevices.get(remoteId) == null) {
+                    mStayDisconnectedDevices.put(remoteId, gatt);
+                } 
             }
         }
 
