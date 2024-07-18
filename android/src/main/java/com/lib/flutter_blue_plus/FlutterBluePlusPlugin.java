@@ -2136,7 +2136,7 @@ public class FlutterBluePlusPlugin implements
                 }
             }
 
-            // disconnected or keep device disconnected?
+            // disconnected?
             if(newState == BluetoothProfile.STATE_DISCONNECTED) {
 
                 // remove from connected devices
