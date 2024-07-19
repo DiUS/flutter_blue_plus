@@ -47,6 +47,7 @@ import java.util.UUID;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Semaphore;
 import java.io.StringWriter;
 import java.io.PrintWriter;
 import java.io.UnsupportedEncodingException;
@@ -99,6 +100,7 @@ public class FlutterBluePlusPlugin implements
 
     static final private String CCCD = "2902";
 
+    private final Semaphore mConnectionCallbackMutex = new Semaphore(1);
     private final Map<String, BluetoothGatt> mConnectedDevices = new ConcurrentHashMap<>();
     private final Map<String, BluetoothGatt> mCurrentlyConnectingDevices = new ConcurrentHashMap<>();
     private final Map<String, BluetoothDevice> mBondingDevices = new ConcurrentHashMap<>();
@@ -676,49 +678,61 @@ public class FlutterBluePlusPlugin implements
                             return;
                         }
 
-                        // already connecting?
-                        if (mCurrentlyConnectingDevices.get(remoteId) != null) {
-                            log(LogLevel.DEBUG, "already connecting");
-                            result.success(true);  // still work to do
-                            return;
-                        } 
+                        try {
+                            mConnectionCallbackMutex.acquire();
 
-                        // already connected?
-                        if (mConnectedDevices.get(remoteId) != null) {
-                            log(LogLevel.DEBUG, "already connected");
-                            result.success(false);  // no work to do
-                            return;
-                        } 
+                            try {
+                                // already connecting?
+                                if (mCurrentlyConnectingDevices.get(remoteId) != null) {
+                                    log(LogLevel.DEBUG, "already connecting");
+                                    result.success(true);  // still work to do
+                                    return;
+                                } 
 
-                        // wait if any device is bonding (increases reliability)
-                        waitIfBonding();
+                                // already connected?
+                                if (mConnectedDevices.get(remoteId) != null) {
+                                    log(LogLevel.DEBUG, "already connected");
+                                    result.success(false);  // no work to do
+                                    return;
+                                } 
 
-                        // connect
-                        BluetoothGatt gatt = null;
-                        BluetoothDevice device = mBluetoothAdapter.getRemoteDevice(remoteId);
-                        if (Build.VERSION.SDK_INT >= 23) { // Android 6.0 (October 2015)
-                            gatt = device.connectGatt(context, autoConnect, mGattCallback, BluetoothDevice.TRANSPORT_LE);
-                        } else {
-                            gatt = device.connectGatt(context, autoConnect, mGattCallback);
+                                // wait if any device is bonding (increases reliability)
+                                waitIfBonding();
+
+                                // connect
+                                BluetoothGatt gatt = null;
+                                BluetoothDevice device = mBluetoothAdapter.getRemoteDevice(remoteId);
+                                if (Build.VERSION.SDK_INT >= 23) { // Android 6.0 (October 2015)
+                                    gatt = device.connectGatt(context, autoConnect, mGattCallback, BluetoothDevice.TRANSPORT_LE);
+                                } else {
+                                    gatt = device.connectGatt(context, autoConnect, mGattCallback);
+                                }
+
+                                // error check
+                                if (gatt == null) {
+                                    result.error("connect", String.format("device.connectGatt returned null"), null);
+                                    return;
+                                }
+
+                                // add to currently connecting peripherals
+                                mCurrentlyConnectingDevices.put(remoteId, gatt);
+
+                                // remember autoconnect 
+                                if (autoConnect) {
+                                    mAutoConnected.put(remoteId, gatt);
+                                } else {
+                                    mAutoConnected.remove(remoteId);
+                                }
+
+                                result.success(true);
+
+                            } finally {
+                                mConnectionCallbackMutex.release();
+                            }
+
+                        } catch (InterruptedException e) {
+                            result.error("connect", String.format("failed to acquire connection callback mutex"), null);
                         }
-
-                        // error check
-                        if (gatt == null) {
-                            result.error("connect", String.format("device.connectGatt returned null"), null);
-                            return;
-                        }
-
-                        // add to currently connecting peripherals
-                        mCurrentlyConnectingDevices.put(remoteId, gatt);
-
-                        // remember autoconnect 
-                        if (autoConnect) {
-                            mAutoConnected.put(remoteId, gatt);
-                        } else {
-                            mAutoConnected.remove(remoteId);
-                        }
-
-                        result.success(true);
                     });
                     break;
                 }
@@ -727,64 +741,76 @@ public class FlutterBluePlusPlugin implements
                 {
                     String remoteId = (String) call.arguments;
 
-                    // already disconnected?
-                    BluetoothGatt gatt = null;
-                    if (gatt == null) {
-                        gatt = mCurrentlyConnectingDevices.get(remoteId);
-                        if (gatt != null) {
-                            log(LogLevel.DEBUG, "disconnect: cancelling connection in progress");
-                        }
-                    }
-                    if (gatt == null) {
-                        gatt = mConnectedDevices.get(remoteId);
-                    }
-                    if (gatt == null) {
-                        gatt = mAutoConnected.get(remoteId);
-                        if (gatt != null) {
-                            log(LogLevel.DEBUG, "already disconnected. disabling autoconnect");
+                    try {
+                        mConnectionCallbackMutex.acquire();
+
+                        try {
+                            // already disconnected?
+                            BluetoothGatt gatt = null;
+                            if (gatt == null) {
+                                gatt = mCurrentlyConnectingDevices.get(remoteId);
+                                if (gatt != null) {
+                                    log(LogLevel.DEBUG, "disconnect: cancelling connection in progress");
+                                }
+                            }
+                            if (gatt == null) {
+                                gatt = mConnectedDevices.get(remoteId);
+                            }
+                            if (gatt == null) {
+                                gatt = mAutoConnected.get(remoteId);
+                                if (gatt != null) {
+                                    log(LogLevel.DEBUG, "already disconnected. disabling autoconnect");
+                                    mAutoConnected.remove(remoteId);
+                                    gatt.disconnect();
+                                    gatt.close();
+                                    result.success(false);  // no work to do
+                                    return;
+                                }
+                            }
+                            if (gatt == null) {
+                                log(LogLevel.DEBUG, "already disconnected");
+                                result.success(false);  // no work to do
+                                return;
+                            }
+
+                            // calling disconnect explicitly turns off autoconnect.
+                            // this allows gatt resources to be reclaimed
                             mAutoConnected.remove(remoteId);
+                        
+                            // disconnect
                             gatt.disconnect();
-                            gatt.close();
-                            result.success(false);  // no work to do
-                            return;
+
+                            // was connecting?
+                            if (mCurrentlyConnectingDevices.get(remoteId) != null) {
+
+                                // remove
+                                mCurrentlyConnectingDevices.remove(remoteId);
+
+                                // cleanup
+                                gatt.close();
+
+                                // random number defined by flutter blue plus.
+                                int bmUserCanceledErrorCode = 23789258;
+
+                                // see: BmConnectionStateResponse
+                                HashMap<String, Object> response = new HashMap<>();
+                                response.put("remote_id", remoteId);
+                                response.put("connection_state", bmConnectionStateEnum(BluetoothProfile.STATE_DISCONNECTED));
+                                response.put("disconnect_reason_code", bmUserCanceledErrorCode);
+                                response.put("disconnect_reason_string", "connection canceled");
+
+                                invokeMethodUIThread("OnConnectionStateChanged", response);
+                            }
+
+                            result.success(true);
+
+                        } finally {
+                            mConnectionCallbackMutex.release();
                         }
+
+                    } catch (InterruptedException e) {
+                        result.error("disconnect", String.format("failed to acquire connection callback mutex"), null);
                     }
-                    if (gatt == null) {
-                        log(LogLevel.DEBUG, "already disconnected");
-                        result.success(false);  // no work to do
-                        return;
-                    }
-
-                    // calling disconnect explicitly turns off autoconnect.
-                    // this allows gatt resources to be reclaimed
-                    mAutoConnected.remove(remoteId);
-                
-                    // disconnect
-                    gatt.disconnect();
-
-                    // was connecting?
-                    if (mCurrentlyConnectingDevices.get(remoteId) != null) {
-
-                        // remove
-                        mCurrentlyConnectingDevices.remove(remoteId);
-
-                        // cleanup
-                        gatt.close();
-
-                        // random number defined by flutter blue plus.
-                        int bmUserCanceledErrorCode = 23789258;
-
-                        // see: BmConnectionStateResponse
-                        HashMap<String, Object> response = new HashMap<>();
-                        response.put("remote_id", remoteId);
-                        response.put("connection_state", bmConnectionStateEnum(BluetoothProfile.STATE_DISCONNECTED));
-                        response.put("disconnect_reason_code", bmUserCanceledErrorCode);
-                        response.put("disconnect_reason_string", "connection canceled");
-
-                        invokeMethodUIThread("OnConnectionStateChanged", response);
-                    }
-
-                    result.success(true);
                     break;
                 }
 
@@ -2103,71 +2129,99 @@ public class FlutterBluePlusPlugin implements
             }
 
             String remoteId = gatt.getDevice().getAddress();
+            boolean invokeConnectionStateChanged = true;
+            boolean releaseMutex = true;
 
-            // connected?
-            if(newState == BluetoothProfile.STATE_CONNECTED) {
+            try {
+                mConnectionCallbackMutex.acquire();
+            } catch (InterruptedException e) {
+                log(LogLevel.ERROR, "onConnectionStateChange: failed to acquire connection callback mutex");
+                // We failed to acquire mutex but we still need to act on the connect/disconnect event,
+                // so proceed without mutex anyway.
+                releaseMutex = false;
+            }
 
-                // If disconnect was called while the stack is in the middle of establishing connection, the disconnect has
-                // no effect, but FBP has already removed the device from mCurrentlyConnectingDevices and notified the app
-                // that the disconnect was successful. Eventually this gatt callback gets called with a successful
-                // Bluetooth connection, so we disconnect the device straight away.
-                if (mCurrentlyConnectingDevices.get(remoteId) == null && mAutoConnected.get(remoteId) == null) {
-                    log(LogLevel.DEBUG, "keeping device disconnected, disconnecting now");
+            try {
+                // connected?
+                if(newState == BluetoothProfile.STATE_CONNECTED) {
+
+                    // If disconnect was called while the stack is in the middle of establishing connection, the disconnect has
+                    // no effect, but FBP has already removed the device from mCurrentlyConnectingDevices and notified the app
+                    // that the disconnect was successful. Eventually this gatt callback gets called with a successful
+                    // Bluetooth connection, so we disconnect the device straight away.
+                    if (mCurrentlyConnectingDevices.get(remoteId) == null && mAutoConnected.get(remoteId) == null) {
+                        log(LogLevel.DEBUG, "keeping device disconnected, disconnecting now");
+
+                        // we have cancelled the connection previously, hide this connect event
+                        invokeConnectionStateChanged = false;
+
+                        // remove from connected devices
+                        mConnectedDevices.remove(remoteId);
+
+                        // remove from currently bonding devices
+                        mBondingDevices.remove(remoteId);
+
+                        // disconnect and close the connection straight away
+                        gatt.disconnect();
+                        gatt.close();
+
+                    } else {
+
+                        // add to connected devices
+                        mConnectedDevices.put(remoteId, gatt);
+
+                        // remove from currently connecting devices
+                        mCurrentlyConnectingDevices.remove(remoteId);
+
+                        // default minimum mtu
+                        mMtu.put(remoteId, 23);
+                    }
+                }
+
+                // disconnected?
+                if(newState == BluetoothProfile.STATE_DISCONNECTED) {
+
+                    if (mConnectedDevices.get(remoteId) == null) {
+                        // we disconnected an unwanted connection, hide this disconnect event
+                        invokeConnectionStateChanged = false;
+                    }
 
                     // remove from connected devices
                     mConnectedDevices.remove(remoteId);
 
-                    // remove from currently bonding devices
-                    mBondingDevices.remove(remoteId);
-
-                    // disconnect and close the connection straight away
-                    gatt.disconnect();
-                    gatt.close();
-
-                } else {
-
-                    // add to connected devices
-                    mConnectedDevices.put(remoteId, gatt);
-
                     // remove from currently connecting devices
                     mCurrentlyConnectingDevices.remove(remoteId);
 
-                    // default minimum mtu
-                    mMtu.put(remoteId, 23);
+                    // remove from currently bonding devices
+                    mBondingDevices.remove(remoteId);
+
+                    // we cannot call 'close' for autoconnected devices
+                    // because it prevents autoconnect from working
+                    if (mAutoConnected.containsKey(remoteId)) {
+                        log(LogLevel.DEBUG, "autoconnect is true. skipping gatt.close()");
+                    } else {
+                        // it is important to close after disconnection, otherwise we will 
+                        // quickly run out of bluetooth resources, preventing new connections
+                        gatt.close();
+                    }
+                }
+
+                if (invokeConnectionStateChanged == true) {
+                    // see: BmConnectionStateResponse
+                    HashMap<String, Object> response = new HashMap<>();
+                    response.put("remote_id", remoteId);
+                    response.put("connection_state", bmConnectionStateEnum(newState));
+                    response.put("disconnect_reason_code", status);
+                    response.put("disconnect_reason_string", hciStatusString(status));
+
+                    invokeMethodUIThread("OnConnectionStateChanged", response);
+                }
+
+            } finally {
+                if (releaseMutex == true) {
+                    mConnectionCallbackMutex.release();
                 }
             }
-
-            // disconnected?
-            if(newState == BluetoothProfile.STATE_DISCONNECTED) {
-
-                // remove from connected devices
-                mConnectedDevices.remove(remoteId);
-
-                // remove from currently connecting devices
-                mCurrentlyConnectingDevices.remove(remoteId);
-
-                // remove from currently bonding devices
-                mBondingDevices.remove(remoteId);
-
-                // we cannot call 'close' for autoconnected devices
-                // because it prevents autoconnect from working
-                if (mAutoConnected.containsKey(remoteId)) {
-                    log(LogLevel.DEBUG, "autoconnect is true. skipping gatt.close()");
-                } else {
-                    // it is important to close after disconnection, otherwise we will 
-                    // quickly run out of bluetooth resources, preventing new connections
-                    gatt.close();
-                }
-            }
-
-            // see: BmConnectionStateResponse
-            HashMap<String, Object> response = new HashMap<>();
-            response.put("remote_id", remoteId);
-            response.put("connection_state", bmConnectionStateEnum(newState));
-            response.put("disconnect_reason_code", status);
-            response.put("disconnect_reason_string", hciStatusString(status));
-
-            invokeMethodUIThread("OnConnectionStateChanged", response);
         }
 
         @Override
